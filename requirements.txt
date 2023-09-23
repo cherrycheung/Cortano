@@ -4,3 +4,4 @@ requests
 scipy
 opencv-python
 pygame
+uvloop
