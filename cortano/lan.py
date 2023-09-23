@@ -12,8 +12,6 @@ from multiprocessing import (
 )
 from ctypes import c_int, c_double, c_bool, c_uint8, c_uint16
 import numpy as np
-import uvloop
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 main_loop = None
 _rxtx_task = None
