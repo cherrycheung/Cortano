@@ -131,8 +131,8 @@ def run_async_rxtx(host, port, shost, sport, run, mvals, svals, ns):
     main_loop = asyncio.new_event_loop()
   _rxtx_task = main_loop.create_task(rxtx(host, port))
   
-  for signo in [signal.SIGINT, signal.SIGTERM]:
-    main_loop.add_signal_handler(signo, _rxtx_task.cancel)
+  # for signo in [signal.SIGINT, signal.SIGTERM]:
+  #   main_loop.add_signal_handler(signo, _rxtx_task.cancel)
 
   try:
     asyncio.set_event_loop(main_loop)
@@ -161,8 +161,8 @@ def run_async_rgbd(host, port, run, fshape, fcolor, fdepth, flock):
     main_loop = asyncio.new_event_loop()
   _rgbd_task = main_loop.create_task(request_handler(_stream_host, _stream_port))
   
-  for signo in [signal.SIGINT, signal.SIGTERM]:
-    main_loop.add_signal_handler(signo, _rgbd_task.cancel)
+  # for signo in [signal.SIGINT, signal.SIGTERM]:
+  #   main_loop.add_signal_handler(signo, _rgbd_task.cancel)
 
   try:
     asyncio.set_event_loop(main_loop)
