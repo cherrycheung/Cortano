@@ -1,142 +1,146 @@
 import websockets
 import asyncio
 import json
-import socket
 import sys
 import pickle
+import qoi
 import cv2
 import signal
 import time
 from multiprocessing import (
   Lock, Array, Value, RawArray, Process
 )
-from ctypes import c_int, c_double, c_bool, c_uint8, c_uint16
+from ctypes import c_int, c_float, c_bool, c_uint8, c_uint16, c_char
 import numpy as np
+import logging
+from datetime import datetime
+
+# shared variables
+frame_shape = (360, 640)
+tx_interval = 1 / 60
+
+frame_lock = Lock()
+color_buf = None
+depth_buf = None
+frame2_lock = Lock()
+color2_buf = None
+cam2_enable = Value(c_bool, False)
+
+motor_values = Array(c_float, 10)
+sensor_values = Array(c_int, 20) # [voltage, sensor1, sensor2, ...]
+sensor_length = Value(c_int, 0)
+voltage_level = Value(c_float, 0)
 
 main_loop = None
-_rxtx_task = None
-_rgbd_task = None
-_connected = Value(c_bool, False)
+_running = Value(c_bool, True)
+last_rx_time = Array(c_char, 100)
+comms_task = None
 
-_host = None
-_port = None
-_stream_host = None
-_stream_port = None
-
-_motor_values = Array(c_int, 10)
-_sensor_values = Array(c_int, 20)
-_num_sensors = Value(c_int, 0)
-_last_rx_time = Value(c_double, time.time() - 30) # set to the past
-
-_frame_shape = (360, 640)
-_frame_color = None
-_frame_depth = None
-_frame_lock = Lock()
-_frame_color_np = None
-_frame_depth_np = None
-_running = Value(c_bool, False)
-_tx_ms_interval = .02
-
-_rxtx_process = None
-_rgbd_process = None
-
-def get_ipv4():
-  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-  s.connect(("8.8.8.8", 80))
-  addr = s.getsockname()[0]
-  s.close()
-  return addr
-
-async def streamer_recv(websocket, path):
-  global _running
-  global _frame_color, _frame_depth, _frame_lock
-  global _frame_color_np, _frame_depth_np
-  _running.value = True
-  if _frame_color_np is None and _frame_color is not None:
-    h, w = _frame_shape
-    _frame_color_np = np.frombuffer(_frame_color, np.uint8).reshape((h, w, 3))
-    _frame_depth_np = np.frombuffer(_frame_depth, np.uint16).reshape((h, w))
-  async for req in websocket:
-    color, depth = pickle.loads(req, fix_imports=True, encoding="bytes")
-    color = cv2.imdecode(color, cv2.IMREAD_COLOR)
-    depth = cv2.imdecode(depth, cv2.IMREAD_UNCHANGED)
-    _frame_lock.acquire()
-    np.copyto(_frame_color_np, color)
-    np.copyto(_frame_depth_np, depth)
-    _frame_lock.release()
-
-async def request_handler(host, port):
-  async with websockets.serve(streamer_recv, host, port):
-    try:
-      await asyncio.Future()
-    except asyncio.exceptions.CancelledError:
-      print("Closing gracefully.")
-      return
-    except Exception as e:
-      print(e)
-      sys.exit(1)
-
-async def rxtx(host='0.0.0.0', port=9999):
-  global _running, _connected
-  global _motor_values, _sensor_values, _num_sensors, _last_rx_time
-  last_tx_time = time.time()
-  _connected.value = False
-
-  ipv4 = get_ipv4()
-  start_time = time.time()
+async def receiver(websocket):
+  h, w = frame_shape
+  color_np = np.frombuffer(color_buf, np.uint8).reshape((h, w, 3))
+  depth_np = np.frombuffer(depth_buf, np.uint8).reshape((h, w // 2, 4))
+  color2_np = np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3))
 
   while _running.value:
     try:
-      async with websockets.connect(f"ws://{host}:{port}") as websocket:
-        _connected.value = True
-        sleep_time = _tx_ms_interval - (time.time() - last_tx_time)
-        if sleep_time > 0: time.sleep(sleep_time) # throttle message stream
-        last_tx_time = time.time()
+      msg = await websocket.recv()
 
-        _motor_values.acquire()
-        mvals = _motor_values[:]
-        _motor_values.release()
-        await websocket.send(json.dumps({ "motors": mvals, "ipv4": ipv4 }))
+      if msg[0] != ord('{') or b'}' not in msg: raise ValueError("")
+      frameptr = msg.index(b'}') + 1
+      data = json.loads(msg[:frameptr].decode("utf-8"))
+      lengths = data["lengths"]
+      if len(lengths) >= 2:
+        frameend = frameptr + lengths[0]
+        # frame_lock.acquire()
+        np.copyto(color_np, qoi.decode(pickle.loads(msg[frameptr:frameend])))
+        frameptr = frameend
+        frameend += lengths[1]
+        # we just want to copy over the bytes
+        np.copyto(depth_np, qoi.decode(pickle.loads(msg[frameptr:frameend])))
+        # frame_lock.release()
+        if len(lengths) == 3:
+          frameptr = frameend
+          frameend += lengths[2]
+          # frame2_lock.acquire()
+          cam2_enable.value = True
+          np.copyto(color2_np, qoi.decode(pickle.loads(msg[frameptr:frameend])))
+          # frame2_lock.release()
 
-        msg = await websocket.recv()
-        msg = json.loads(msg)
-        if "sensors" in msg:
-          sensors = msg["sensors"]
-          _sensor_values.acquire()
-          ns = _num_sensors.value = len(sensors)
-          _sensor_values[:ns] = sensors
-          _last_rx_time.value = last_tx_time - start_time
-          _sensor_values.release()
-    except asyncio.exceptions.CancelledError as e:
-      _connected.value = False
-    except Exception as e:
-      _connected.value = False
-      pass # this will allow this loop to continue running, allowing the stream to run as well
+      sensor_values.acquire()
+      nsensors = sensor_length.value = len(data["sensors"])
+      sensor_values[:nsensors] = data["sensors"]
+      voltage_level.value = float(data["voltage"]) / 1000.
+      sensor_values.release()
 
-def run_async_rxtx(host, port, shost, sport, run, mvals, svals, ns):
-  global _running, main_loop, _rxtx_task
-  global _stream_host, _stream_port
-  global _host, _port, _motor_values, _sensor_values, _num_sensors
+      last_rx_time.acquire()
+      last_rx_time.value = data["timestamp"].encode()
+      last_rx_time.release()
+    except ValueError:
+      logging.error("Invalid data received")
+    except websockets.ConnectionClosed:
+      logging.warning(datetime.isoformat(datetime.now()) + " Connection closed, attempting to reestablish...")
+      last_rx_time.acquire()
+      last_rx_time.value = "".encode()
+      last_rx_time.release()
+      # await asyncio.sleep(1)
+      sys.exit(1)
+
+async def sender(websocket):
+  last_tx_time = None
+  while _running.value:
+    try:
+      # throttle communication so that we don't bombard the socket connection
+      curr_time = datetime.now()
+      dt = tx_interval if last_tx_time is None else (curr_time - last_tx_time).total_seconds()
+      if dt < tx_interval:
+        await asyncio.sleep(tx_interval - dt)
+        last_tx_time = datetime.now()
+      else:
+        last_tx_time = curr_time
+      motor_values.acquire()
+      motors = motor_values[:]
+      motor_values.release()
+
+      motors = [int(x) for x in np.array(motors, np.float32).clip(-1, 1) * 127]
+      await websocket.send(json.dumps({"motors": motors}).encode("utf-8"))
+    except websockets.ConnectionClosed:
+      logging.warning(datetime.isoformat(datetime.now()) + " Connection closed, attempting to reestablish...")
+      last_tx_time = None
+      # await asyncio.sleep(1)
+      sys.exit(1)
+
+async def wss_task(host, port):
+  async with websockets.connect(f"ws://{host}:{port}", max_size=3000000) as websocket:
+    recv_task = asyncio.create_task(receiver(websocket))
+    send_task = asyncio.create_task(sender(websocket))
+    await asyncio.gather(recv_task, send_task)
+
+def comms_worker(host, port, run, cbuf, dbuf, flock, cbuf2, cam2_en, flock2, mvals, svals, ns, vlvl):
+  global main_loop, _running
+  global color_buf, depth_buf, frame_lock
+  global color2_buf, cam2_enable, frame2_lock
+  global motor_values, sensor_values, sensor_length, voltage_level
   
-  _host = host
-  _port = port
-  _stream_host = "0.0.0.0"
-  _stream_port = sport
+  color_buf = cbuf
+  depth_buf = dbuf
+  frame_lock = flock
+
+  color2_buf = cbuf2
+  cam2_enable = cam2_en
+  frame2_lock = flock2
+
+  motor_values = mvals
+  sensor_values = svals
+  sensor_length = ns
+  voltage_level = vlvl
+
   _running = run
-  _motor_values = mvals
-  _sensor_values = svals
-  _num_sensors = ns
-
-  if main_loop is None:
-    main_loop = asyncio.new_event_loop()
-  _rxtx_task = main_loop.create_task(rxtx(host, port))
-  
-  # for signo in [signal.SIGINT, signal.SIGTERM]:
-  #   main_loop.add_signal_handler(signo, _rxtx_task.cancel)
-
+  main_loop = asyncio.new_event_loop()
+  request_task = main_loop.create_task(wss_task(host, port))
   try:
     asyncio.set_event_loop(main_loop)
-    main_loop.run_until_complete(_rxtx_task)
+    main_loop.run_until_complete(request_task)
   except (KeyboardInterrupt,):
     _running.value = False
     main_loop.stop()
@@ -144,80 +148,36 @@ def run_async_rxtx(host, port, shost, sport, run, mvals, svals, ns):
     main_loop.run_until_complete(main_loop.shutdown_asyncgens())
     main_loop.close()
 
-def run_async_rgbd(host, port, run, fshape, fcolor, fdepth, flock):
-  global _running, main_loop, _rgbd_task
-  global _stream_host, _stream_port
-  global _frame_shape, _frame_color, _frame_depth, _frame_lock
+def start(host="0.0.0.0", port=9999):
+  global comms_task
+  global color_buf, depth_buf, color2_buf
 
-  _stream_host = "0.0.0.0"
-  _stream_port = port
-  _running = run
-  _frame_shape = fshape
-  _frame_color = fcolor
-  _frame_depth = fdepth
-  _frame_lock = flock
+  color_buf = RawArray(c_uint8, frame_shape[0] * frame_shape[1] * 3)
+  depth_buf = RawArray(c_uint8, frame_shape[0] * frame_shape[1] * 2)
+  color2_buf = RawArray(c_uint8, frame_shape[0] * frame_shape[1] * 3)
 
-  if main_loop is None:
-    main_loop = asyncio.new_event_loop()
-  _rgbd_task = main_loop.create_task(request_handler(_stream_host, _stream_port))
-  
-  # for signo in [signal.SIGINT, signal.SIGTERM]:
-  #   main_loop.add_signal_handler(signo, _rgbd_task.cancel)
-
-  try:
-    asyncio.set_event_loop(main_loop)
-    main_loop.run_until_complete(_rgbd_task)
-  except (KeyboardInterrupt,):
-    _running.value = False
-    main_loop.stop()
-  finally:
-    main_loop.run_until_complete(main_loop.shutdown_asyncgens())
-    main_loop.close()
-
-def start(host="0.0.0.0", port=9999, frame_shape=(360, 640)):
-  global _running
-  global _motor_values, _sensor_values, _num_sensors, _last_rx_time
-  global _host, _port, _frame_shape, _frame_color, _frame_depth, _frame_lock
-  global _rxtx_process, _rgbd_process
-
-  _host = host
-  _port = port
-  _running = Value(c_bool, True)
-  _stream_host = "0.0.0.0"
-  _stream_port = _port + 1
-  _frame_shape = frame_shape
-  _frame_color = RawArray(c_uint8, _frame_shape[0] * _frame_shape[1] * 3)
-  _frame_depth = RawArray(c_uint16, _frame_shape[0] * _frame_shape[1])
-  _frame_lock = Lock()
-
-  _rxtx_process = Process(target=run_async_rxtx, args=(
-    _host, _port, _stream_host, _stream_port,
-    _running, _motor_values, _sensor_values, _num_sensors))
-  _rxtx_process.start()
-
-  _rgbd_process = Process(target=run_async_rgbd, args=(
-    _stream_host, _stream_port, _running,
-    _frame_shape, _frame_color, _frame_depth, _frame_lock))
-  _rgbd_process.start()
+  comms_task = Process(target=comms_worker, args=(
+    host, port, _running,
+    color_buf, depth_buf, frame_lock,
+    color2_buf, cam2_enable, frame2_lock,
+    motor_values, sensor_values, sensor_length, voltage_level))
+  comms_task.start()
 
 def stop():
-  global _running, _rxtx_process, _rgbd_process
-  _running.acquire()
-  running = _running.value
+  global comms_task
+  was_running = _running.value
   _running.value = False
-  _running.release()
-  if running:
-    if sys.platform.startswith('win') and _rxtx_process:
-      _rxtx_process.terminate()
-      _rgbd_process.terminate()
-      time.sleep(0.3)
-      _rxtx_process.kill()
-      _rgbd_process.kill()
-      _rxtx_process = None
-      _rgbd_process = None
+  if was_running:
+    if sys.platform.startswith('win') and comms_task is not None:
+      comms_task.terminate()
+      comms_task.join()
+      comms_task = None
       time.sleep(0.3)
     else:
-      time.sleep(0.5) # cant kill the process because linux is strange
+      comms_task.kill()
+      comms_task = None
+      time.sleep(0.5) # cant kill the process because linux is weird
+      sys.exit(0)
 
 def sig_handler(signum, frame):
   if signum == signal.SIGINT or signum == signal.SIGTERM:
@@ -227,32 +187,54 @@ def sig_handler(signum, frame):
 signal.signal(signal.SIGINT, sig_handler)
 signal.signal(signal.SIGTERM, sig_handler)
 
-def get_frame():
-  global _frame_lock, _frame_color, _frame_depth
-  global _frame_color_np, _frame_depth_np
-  if _frame_color_np is None and _frame_color is not None:
-    h, w = _frame_shape
-    _frame_color_np = np.frombuffer(_frame_color, np.uint8).reshape((h, w, 3))
-    _frame_depth_np = np.frombuffer(_frame_depth, np.uint16).reshape((h, w))
-  _frame_lock.acquire()
-  color = np.copy(_frame_color_np)
-  depth = np.copy(_frame_depth_np)
-  _frame_lock.release()
-  return color, depth
-
 def read():
-  global _sensor_values, _num_sensors, _last_rx_time
-  _sensor_values.acquire()
-  ns = _num_sensors.value
-  sensors = [] if ns == 0 else _sensor_values[:ns]
-  rxt = _last_rx_time.value
-  _sensor_values.release()
-  return sensors # time, values
+  """Return sensors values, voltage (V) and time when the data comes in
 
-def write(motor_values):
-  global _motor_values
+  Returns:
+      Tuple[np.ndarray, np.ndarray, List[int], Dict[float, datetime, np.ndarray]]: color, depth, sensors, { voltage, time, cam2 }
+  """
+  h, w = frame_shape
+  color_np = np.frombuffer(color_buf, np.uint8).reshape((h, w, 3))
+  depth_np = np.frombuffer(depth_buf, np.uint16).reshape((h, w))
+  # frame_lock.acquire()
+  color = np.copy(color_np)
+  depth = np.copy(depth_np)
+  # frame_lock.release()
+  # frame2_lock.acquire()
+  if cam2_enable.value:
+    color2_np = np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3))
+    color2 = np.copy(color2_np)
+  else:
+    color2 = None
+  # frame2_lock.release()
+
+  sensor_values.acquire()
+  ns = sensor_length.value
+  sensors = [] if ns == 0 else sensor_values[:ns]
+  voltage = voltage_level.value
+  sensor_values.release()
+
+  last_rx_time.acquire()
+  rxtime = last_rx_time.value.decode()
+  if len(rxtime) > 0:
+    rxtime = datetime.fromisoformat(rxtime)
+  else:
+    rxtime = None
+  last_rx_time.release()
+
+  return color, depth, sensors, { "voltage": voltage, "time": rxtime, "cam2": color2 }
+
+def write(values):
+  """Send motor values to remote location
+
+  Args:
+      values (List[int]): motor values
+  """
   assert(len(motor_values) == 10)
-  motor_values = list(motor_values)
-  _motor_values.acquire()
-  _motor_values[:] = motor_values
-  _motor_values.release()
+  values = [int(x) for x in motor_values]
+  motor_values.acquire()
+  motor_values[:] = values
+  motor_values.release()
+
+def running():
+  return _running.value
