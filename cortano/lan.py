@@ -3,7 +3,6 @@ import asyncio
 import json
 import sys
 import pickle
-import qoi
 import cv2
 import signal
 import time
@@ -27,7 +26,7 @@ color2_buf = None
 cam2_enable = Value(c_bool, False)
 
 motor_values = Array(c_float, 10)
-sensor_values = Array(c_int, 20) # [voltage, sensor1, sensor2, ...]
+sensor_values = Array(c_float, 20) # [sensor1, sensor2, ...]
 sensor_length = Value(c_int, 0)
 voltage_level = Value(c_float, 0)
 
@@ -39,13 +38,12 @@ comms_task = None
 async def receiver(websocket):
   h, w = frame_shape
   color_np = np.frombuffer(color_buf, np.uint8).reshape((h, w, 3))
-  depth_np = np.frombuffer(depth_buf, np.uint8).reshape((h, w // 2, 4))
+  depth_np = np.frombuffer(depth_buf, np.uint16).reshape((h, w))
   color2_np = np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3))
 
   while _running.value:
     try:
       msg = await websocket.recv()
-
       if msg[0] != ord('{') or b'}' not in msg: raise ValueError("")
       frameptr = msg.index(b'}') + 1
       data = json.loads(msg[:frameptr].decode("utf-8"))
@@ -53,24 +51,27 @@ async def receiver(websocket):
       if len(lengths) >= 2:
         frameend = frameptr + lengths[0]
         # frame_lock.acquire()
-        np.copyto(color_np, qoi.decode(pickle.loads(msg[frameptr:frameend])))
+        buf = pickle.loads(msg[frameptr:frameend])
+        np.copyto(color_np, cv2.cvtColor(cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED), cv2.COLOR_RGB2BGR))
         frameptr = frameend
         frameend += lengths[1]
         # we just want to copy over the bytes
-        np.copyto(depth_np, qoi.decode(pickle.loads(msg[frameptr:frameend])))
+        buf = pickle.loads(msg[frameptr:frameend])
+        np.copyto(depth_np, cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED))
         # frame_lock.release()
         if len(lengths) == 3:
           frameptr = frameend
           frameend += lengths[2]
           # frame2_lock.acquire()
           cam2_enable.value = True
-          np.copyto(color2_np, qoi.decode(pickle.loads(msg[frameptr:frameend])))
+          buf = pickle.loads(msg[frameptr:frameend])
+          np.copyto(color2_np, cv2.cvtColor(cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED), cv2.COLOR_RGB2BGR))
           # frame2_lock.release()
 
       sensor_values.acquire()
       nsensors = sensor_length.value = len(data["sensors"])
-      sensor_values[:nsensors] = data["sensors"]
-      voltage_level.value = float(data["voltage"]) / 1000.
+      sensor_values[:nsensors] = [float(x) for x in data["sensors"]]
+      voltage_level.value = float(data["voltage"]) / 1e3
       sensor_values.release()
 
       last_rx_time.acquire()
@@ -83,8 +84,8 @@ async def receiver(websocket):
       last_rx_time.acquire()
       last_rx_time.value = "".encode()
       last_rx_time.release()
-      # await asyncio.sleep(1)
-      sys.exit(1)
+      await asyncio.sleep(1)
+      # sys.exit(1)
 
 async def sender(websocket):
   last_tx_time = None
@@ -103,18 +104,19 @@ async def sender(websocket):
       motor_values.release()
 
       motors = [int(x) for x in np.array(motors, np.float32).clip(-1, 1) * 127]
-      await websocket.send(json.dumps({"motors": motors}).encode("utf-8"))
+      msg = json.dumps({"motors": motors}).encode("utf-8")
+      await websocket.send(msg)
     except websockets.ConnectionClosed:
       logging.warning(datetime.isoformat(datetime.now()) + " Connection closed, attempting to reestablish...")
       last_tx_time = None
-      # await asyncio.sleep(1)
-      sys.exit(1)
+      await asyncio.sleep(1)
+      # sys.exit(1)
 
 async def wss_task(host, port):
   async with websockets.connect(f"ws://{host}:{port}", max_size=3000000) as websocket:
-    recv_task = asyncio.create_task(receiver(websocket))
-    send_task = asyncio.create_task(sender(websocket))
-    await asyncio.gather(recv_task, send_task)
+    recv_task = main_loop.create_task(receiver(websocket))
+    send_task = main_loop.create_task(sender(websocket))
+    await asyncio.gather(send_task, recv_task)
 
 def comms_worker(host, port, run, cbuf, dbuf, flock, cbuf2, cam2_en, flock2, mvals, svals, ns, vlvl):
   global main_loop, _running
@@ -179,13 +181,13 @@ def stop():
       time.sleep(0.5) # cant kill the process because linux is weird
       sys.exit(0)
 
-def sig_handler(signum, frame):
-  if signum == signal.SIGINT or signum == signal.SIGTERM:
-    stop()
-    sys.exit(0)
+# def sig_handler(signum, frame):
+#   if signum == signal.SIGINT or signum == signal.SIGTERM:
+#     stop()
+#     sys.exit(0)
 
-signal.signal(signal.SIGINT, sig_handler)
-signal.signal(signal.SIGTERM, sig_handler)
+# signal.signal(signal.SIGINT, sig_handler)
+# signal.signal(signal.SIGTERM, sig_handler)
 
 def read():
   """Return sensors values, voltage (V) and time when the data comes in
@@ -228,10 +230,10 @@ def write(values):
   """Send motor values to remote location
 
   Args:
-      values (List[int]): motor values
+      values (List[float]): motor values
   """
-  assert(len(motor_values) == 10)
-  values = [int(x) for x in motor_values]
+  assert(len(values) == 10)
+  values = [float(x) for x in values]
   motor_values.acquire()
   motor_values[:] = values
   motor_values.release()
