@@ -16,7 +16,7 @@ from datetime import datetime
 
 # shared variables
 frame_shape = (360, 640)
-tx_interval = 1 / 60
+tx_interval = 1 / 50
 
 frame_lock = Lock()
 color_buf = None
@@ -35,88 +35,94 @@ _running = Value(c_bool, True)
 last_rx_time = Array(c_char, 100)
 comms_task = None
 
-async def receiver(websocket):
-  h, w = frame_shape
-  color_np = np.frombuffer(color_buf, np.uint8).reshape((h, w, 3))
-  depth_np = np.frombuffer(depth_buf, np.uint16).reshape((h, w))
-  color2_np = np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3))
-
+async def receive_task(host, port):
   while _running.value:
-    try:
-      msg = await websocket.recv()
-      if msg[0] != ord('{') or b'}' not in msg: raise ValueError("")
-      frameptr = msg.index(b'}') + 1
-      data = json.loads(msg[:frameptr].decode("utf-8"))
-      lengths = data["lengths"]
-      if len(lengths) >= 2:
-        frameend = frameptr + lengths[0]
-        # frame_lock.acquire()
-        buf = pickle.loads(msg[frameptr:frameend])
-        np.copyto(color_np, cv2.cvtColor(cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED), cv2.COLOR_RGB2BGR))
-        frameptr = frameend
-        frameend += lengths[1]
-        # we just want to copy over the bytes
-        buf = pickle.loads(msg[frameptr:frameend])
-        np.copyto(depth_np, cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED))
-        # frame_lock.release()
-        if len(lengths) == 3:
-          frameptr = frameend
-          frameend += lengths[2]
-          # frame2_lock.acquire()
-          cam2_enable.value = True
-          buf = pickle.loads(msg[frameptr:frameend])
-          np.copyto(color2_np, cv2.cvtColor(cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED), cv2.COLOR_RGB2BGR))
-          # frame2_lock.release()
+    async with websockets.connect(f"ws://{host}:{port}", max_size=3000000) as websocket:
+      h, w = frame_shape
+      color_np = np.frombuffer(color_buf, np.uint8).reshape((h, w, 3))
+      depth_np = np.frombuffer(depth_buf, np.uint16).reshape((h, w))
+      color2_np = np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3))
 
-      sensor_values.acquire()
-      nsensors = sensor_length.value = len(data["sensors"])
-      sensor_values[:nsensors] = [float(x) for x in data["sensors"]]
-      voltage_level.value = float(data["voltage"]) / 1e3
-      sensor_values.release()
+      while _running.value:
+        try:
+          msg = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+          if msg[0] != ord('{') or b'}' not in msg: raise ValueError("")
+          frameptr = msg.index(b'}') + 1
+          data = json.loads(msg[:frameptr].decode("utf-8"))
+          lengths = data["lengths"]
+          if len(lengths) >= 2:
+            frameend = frameptr + lengths[0]
+            # frame_lock.acquire()
+            buf = pickle.loads(msg[frameptr:frameend])
+            np.copyto(color_np, cv2.cvtColor(cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED), cv2.COLOR_RGB2BGR))
+            frameptr = frameend
+            frameend += lengths[1]
+            # we just want to copy over the bytes
+            buf = pickle.loads(msg[frameptr:frameend])
+            np.copyto(depth_np, cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED))
+            # frame_lock.release()
+            if len(lengths) == 3:
+              frameptr = frameend
+              frameend += lengths[2]
+              # frame2_lock.acquire()
+              cam2_enable.value = True
+              buf = pickle.loads(msg[frameptr:frameend])
+              np.copyto(color2_np, cv2.cvtColor(cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_UNCHANGED), cv2.COLOR_RGB2BGR))
+              # frame2_lock.release()
 
-      last_rx_time.acquire()
-      last_rx_time.value = data["timestamp"].encode()
-      last_rx_time.release()
-    except ValueError:
-      logging.error("Invalid data received")
-    except websockets.ConnectionClosed:
-      logging.warning(datetime.isoformat(datetime.now()) + " Connection closed, attempting to reestablish...")
-      last_rx_time.acquire()
-      last_rx_time.value = "".encode()
-      last_rx_time.release()
-      await asyncio.sleep(1)
-      # sys.exit(1)
+          sensor_values.acquire()
+          nsensors = sensor_length.value = len(data["sensors"])
+          sensor_values[:nsensors] = [float(x) for x in data["sensors"]]
+          voltage_level.value = float(data["voltage"]) / 1e3
+          sensor_values.release()
 
-async def sender(websocket):
-  last_tx_time = None
-  while _running.value:
-    try:
-      # throttle communication so that we don't bombard the socket connection
-      curr_time = datetime.now()
-      dt = tx_interval if last_tx_time is None else (curr_time - last_tx_time).total_seconds()
-      if dt < tx_interval:
-        await asyncio.sleep(tx_interval - dt)
-        last_tx_time = datetime.now()
-      else:
-        last_tx_time = curr_time
-      motor_values.acquire()
-      motors = motor_values[:]
-      motor_values.release()
+          last_rx_time.acquire()
+          last_rx_time.value = data["timestamp"].encode()
+          last_rx_time.release()
+        except ValueError:
+          logging.error("Invalid data received")
+        except asyncio.TimeoutError:
+          logging.warning(datetime.isoformat(datetime.now()) + " Connection is jittery, attempting to reset...")
+          last_rx_time.acquire()
+          last_rx_time.value = "".encode()
+          last_rx_time.release()
+          # await asyncio.sleep(1)
+          # sys.exit(1)
+          break
+        except websockets.ConnectionClosed:
+          logging.warning(datetime.isoformat(datetime.now()) + " Connection closed, attempting to reestablish...")
+          last_rx_time.acquire()
+          last_rx_time.value = "".encode()
+          last_rx_time.release()
+          # await asyncio.sleep(1)
+          # sys.exit(1)
+          break
 
-      motors = [int(x) for x in np.array(motors, np.float32).clip(-1, 1) * 127]
-      msg = json.dumps({"motors": motors}).encode("utf-8")
-      await websocket.send(msg)
-    except websockets.ConnectionClosed:
-      logging.warning(datetime.isoformat(datetime.now()) + " Connection closed, attempting to reestablish...")
-      last_tx_time = None
-      await asyncio.sleep(1)
-      # sys.exit(1)
+async def sender_task(host, port):
+  async with websockets.connect(f"ws://{host}:{port}") as websocket:
+    last_tx_time = None
+    while _running.value:
+      try:
+        # throttle communication so that we don't bombard the socket connection
+        curr_time = datetime.now()
+        dt = tx_interval if last_tx_time is None else (curr_time - last_tx_time).total_seconds()
+        if dt < tx_interval:
+          await asyncio.sleep(tx_interval - dt)
+          last_tx_time = datetime.now()
+        else:
+          last_tx_time = curr_time
+        motor_values.acquire()
+        motors = motor_values[:]
+        motor_values.release()
 
-async def wss_task(host, port):
-  async with websockets.connect(f"ws://{host}:{port}", max_size=3000000) as websocket:
-    recv_task = main_loop.create_task(receiver(websocket))
-    send_task = main_loop.create_task(sender(websocket))
-    await asyncio.gather(send_task, recv_task)
+        motors = [int(x) for x in np.array(motors, np.float32).clip(-1, 1) * 127]
+        msg = json.dumps({"motors": motors}).encode("utf-8")
+        await websocket.send(msg)
+      except websockets.ConnectionClosed:
+        logging.warning(datetime.isoformat(datetime.now()) + " Connection closed, attempting to reestablish...")
+        last_tx_time = None
+        await asyncio.sleep(1)
+        # sys.exit(1)
 
 def comms_worker(host, port, run, cbuf, dbuf, flock, cbuf2, cam2_en, flock2, mvals, svals, ns, vlvl):
   global main_loop, _running
@@ -139,10 +145,12 @@ def comms_worker(host, port, run, cbuf, dbuf, flock, cbuf2, cam2_en, flock2, mva
 
   _running = run
   main_loop = asyncio.new_event_loop()
-  request_task = main_loop.create_task(wss_task(host, port))
+  recv_task = main_loop.create_task(receive_task(host, port-1))
+  send_task = main_loop.create_task(sender_task(host, port))
   try:
     asyncio.set_event_loop(main_loop)
-    main_loop.run_until_complete(request_task)
+    main_loop.run_until_complete(send_task)
+    main_loop.run_until_complete(recv_task)
   except (KeyboardInterrupt,):
     _running.value = False
     main_loop.stop()

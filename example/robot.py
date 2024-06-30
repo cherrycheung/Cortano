@@ -1,7 +1,7 @@
 from cortano import RemoteInterface
 
 if __name__ == "__main__":
-  robot = RemoteInterface("192.168.50.79")
+  robot = RemoteInterface("192.168.1.100")
   while robot.running():
     color, depth, sensors, _ = robot.read()
     # print(info['voltage'], sensors, info['time'])

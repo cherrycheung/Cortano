@@ -16,7 +16,7 @@ import sys
 import time
 
 def _depth2rgb(depth):
-  return cv2.applyColorMap(np.sqrt(depth).astype(np.uint8), cv2.COLORMAP_HSV)
+  return cv2.applyColorMap(np.clip(np.sqrt(depth) * 4, 0, 255).astype(np.uint8), cv2.COLORMAP_HSV)
 
 def _ctk_interface(key_values, color_buf, depth_buf, color2_buf):
   ctk.set_appearance_mode("Dark")
