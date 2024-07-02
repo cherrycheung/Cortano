@@ -25,7 +25,7 @@ depth_buf = None
 frame2_lock = Lock()
 color2_buf = None
 cam2_enable = Value(c_bool, False)
-coro_recv = Value(c_int, 0)
+coro_recv = None
 
 motor_values = Array(c_float, 10)
 sensor_values = Array(c_float, 20) # [sensor1, sensor2, ...]
@@ -53,7 +53,6 @@ async def try_recv(host, port):
         data = json.loads(msg[:frameptr].decode("utf-8"))
 
         can_write = False
-
         last_rx_time.acquire()
         prev_time = datetime.fromisoformat(last_rx_time.value.decode())
         curr_time = datetime.fromisoformat(data["timestamp"])
@@ -61,7 +60,6 @@ async def try_recv(host, port):
           can_write = True
           last_rx_time.value = data["timestamp"].encode()
         last_rx_time.release()
-
         if not can_write: continue
 
         lengths = data["lengths"]
@@ -94,13 +92,13 @@ async def try_recv(host, port):
       except ValueError:
         logging.error("Invalid data received")
       except asyncio.TimeoutError:
-        logging.warning(datetime.isoformat(datetime.now()) + " Connection is jittery, attempting to reset...")
+        logging.warning(datetime.isoformat(datetime.now()) + " Connection is unstable.")
         coro_recv.acquire()
         coro_recv.value = (coro_recv.value + 1) % 4
         coro_recv.release()
         return
       except websockets.ConnectionClosed:
-        logging.warning(datetime.isoformat(datetime.now()) + " Connection closed, attempting to reestablish...")
+        logging.warning(datetime.isoformat(datetime.now()) + " Connection closed.")
         coro_recv.acquire()
         coro_recv.value = (coro_recv.value + 1) % 4
         coro_recv.release()
