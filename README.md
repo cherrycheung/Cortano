@@ -1,61 +1,59 @@
 # Cortano
-Remote Interface for CortexNanoBridge
+Remote Interface for Jetson Nano + Vex Cortex
 
-To install on your laptop/desktop:
-
-```bash
-python3 -m pip install .
-```
-
-## Example Program
-To start a program to connect to your robot, first get the ip address from your Jetson Nano.
-This can be done by first going to the Jetson Nano and typing the following into a new terminal:
+### Getting Started
+1. Get your Jetson's IP address. This can be done by typing the following into a new terminal:
 
 ```bash
 ifconfig
 ```
 
-Your IP Address should be the IPv4 address (ie. 172.168.0.2) under wlan0.
+Your IP Address should be the IPv4 address (ie. 192.168.1.100) under wlan0.
 
-Then, go to your laptop/desktop. After installing this repository (located above), you can now write a program to
-connect to your robot:
+2. Install this repository to to your laptop/desktop.
 
-```python
-from cortano import RemoteInterface
-
-if __name__ == "__main__":
-  robot = RemoteInterface("172.168.0.2") # remember to put your ip here
-  while True:
-    robot.update() # required
+```bash
+python3 -m pip install .
 ```
 
-To control a robot, set the motor values (0-10) to anywhere between [-127, 127]
+3. You can now run an example program to read sensor data and camera frames from the robot
 
 ```python
 from cortano import RemoteInterface
 
 if __name__ == "__main__":
-  robot = RemoteInterface("172.168.0.2")
-  while True:
-    robot.update()
-    
+  robot = RemoteInterface("192.168.1.100") # remember to put your ip here
+  while robot.running():
+    color, depth, sensors, info = robot.read()
+```
+
+To control a robot, set the motor values (0-10) to anywhere between [-1, 1]
+
+```python
+from cortano import RemoteInterface
+
+if __name__ == "__main__":
+  robot = RemoteInterface("192.168.1.100")
+  while robot.running():
     forward = robot.keys["w"] - robot.keys["s"]
-    robot.motor[0] = forward * 64
-    robot.motor[9] = forward * 64
+    robot.motor[0] = forward * 0.5
+    robot.motor[9] = forward * -0.5
 ```
 
-To get the color and depth frames, as well as other sensor data (up to 20) from the robot,
-just read()
+The info struct contains additional information:
+|  |  |
+|--|--|
+| voltage | 0.0 - 14.0V
+| cam2 | second camera's color frame (optional) |
+| time | timestamp on robot when data was sent |
 
-```python
-from cortano import RemoteInterface
+### API
 
-if __name__ == "__main__":
-  robot = RemoteInterface("172.168.0.2")
-  while True:
-    robot.update()
-    
-    color, depth, sensors = robot.read()
-```
-
-That's it!
+| Method | Description | Return |
+|-|-|-|
+| `RemoteInterface(host, port)` | Constructor. Initialize socket connection to robot using `host` and `port=(default: 9999)` | `RemoteInterface` |
+| `running()` | Inspect whether or not a robot is still running | `bool` |
+| `read()` | Get sensor values, camera frames, and power level from the robot | <ul><li>color: `uint8[360, 640, 3]`</li><li>depth: `uint16[360, 640]`</li><li>sensors: `float[20]`</li><li>info: `{`...`}`</li></ul> |
+| `motor[port]` | Set a motor port value between `[-1, 1]` | `ref(float)` |
+| `disp(frame)` | Display a secondary frame |  |
+| `keys[keyname]` | Given a `keyname:char`, returns if pressed down or not | 1 if pressed, 0 otherwise |
