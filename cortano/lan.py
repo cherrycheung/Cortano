@@ -66,8 +66,8 @@ async def try_recv(host, port):
         if len(lengths) >= 2:
           frameend = frameptr + lengths[0]
           # frame_lock.acquire()
-          np.copyto(color_np, cv2.cvtColor(qoi.decode(
-            np.frombuffer(msg[frameptr:frameend], dtype=np.uint8)), cv2.COLOR_RGB2BGR))
+          np.copyto(color_np, qoi.decode(
+            np.frombuffer(msg[frameptr:frameend], dtype=np.uint8)))
           frameptr = frameend
           frameend += lengths[1]
           # we just want to copy over the bytes
@@ -79,8 +79,8 @@ async def try_recv(host, port):
             frameend += lengths[2]
             # frame2_lock.acquire()
             cam2_enable.value = True
-            np.copyto(color2_np, cv2.cvtColor(qoi.decode(
-              np.frombuffer(msg[frameptr:frameend], dtype=np.uint8)), cv2.COLOR_RGB2BGR))
+            np.copyto(color2_np, qoi.decode(
+              np.frombuffer(msg[frameptr:frameend], dtype=np.uint8)))
             # frame2_lock.release()
 
         sensor_values.acquire()
@@ -115,7 +115,7 @@ async def receive_task(host, port, workerid):
       can_continue = False
     coro_recv.release()
     if can_continue:
-      await try_recv(host, port - (workerid & 0x1))
+      await try_recv(host, port)
       can_continue = False
     else:
       await asyncio.sleep(0.5)
@@ -171,9 +171,9 @@ def comms_worker(host, port, run, cbuf, dbuf, flock, cbuf2, cam2_en, flock2, mva
   main_loop = asyncio.new_event_loop()
   # we need 4 workers to cycle through the 2 network ports, due to instability
   recv_task1 = main_loop.create_task(receive_task(host, port-1, 0))
-  recv_task2 = main_loop.create_task(receive_task(host, port-1, 1))
+  recv_task2 = main_loop.create_task(receive_task(host, port-2, 1))
   recv_task3 = main_loop.create_task(receive_task(host, port-1, 2))
-  recv_task4 = main_loop.create_task(receive_task(host, port-1, 3))
+  recv_task4 = main_loop.create_task(receive_task(host, port-2, 3))
   send_task = main_loop.create_task(sender_task(host, port))
   try:
     asyncio.set_event_loop(main_loop)

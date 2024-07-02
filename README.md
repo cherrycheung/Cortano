@@ -1,5 +1,5 @@
 # Cortano
-Remote Interface for Jetson Nano + Vex Cortex
+Remote Interface for Jetson Nano + Vex Cortex, which connects to the robot. The partner component that should be installed first on the robot's Jetson Nano can be found at [CortexNanoBridge](https://github.com/timrobot/CortexNanoBridge).
 
 ### Getting Started
 1. Get your Jetson's IP address. This can be done by typing the following into a new terminal:
@@ -55,5 +55,4 @@ The info struct contains additional information:
 | `running()` | Inspect whether or not a robot is still running | `bool` |
 | `read()` | Get sensor values, camera frames, and power level from the robot | <ul><li>color: `uint8[360, 640, 3]`</li><li>depth: `uint16[360, 640]`</li><li>sensors: `float[20]`</li><li>info: `{`...`}`</li></ul> |
 | `motor[port]` | Set a motor port value between `[-1, 1]` | `ref(float)` |
-| `disp(frame)` | Display a secondary frame |  |
 | `keys[keyname]` | Given a `keyname:char`, returns if pressed down or not | 1 if pressed, 0 otherwise |
