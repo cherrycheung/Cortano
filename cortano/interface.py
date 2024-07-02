@@ -14,10 +14,10 @@ from multiprocessing import (
 from ctypes import c_uint8, c_float
 from PIL import Image, ImageTk
 import logging
-import lan
 import sys
 import time
 import platform
+from . import lan
 
 def _depth2rgb(depth):
   return cv2.applyColorMap(np.clip(np.sqrt(depth) * 4, 0, 255).astype(np.uint8), cv2.COLORMAP_HSV)
