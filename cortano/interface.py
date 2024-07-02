@@ -1,9 +1,95 @@
 import cv2
 import numpy as np
-import time
-import pygame
+import customtkinter as ctk
+from multiprocessing import (
+  Process,
+  Lock,
+  Array,
+  RawArray,
+  Value
+)
+from ctypes import c_uint8
+from PIL import Image, ImageTk
+import logging
+import lan
 import sys
-from . import lan
+import time
+
+def _depth2rgb(depth):
+  return cv2.applyColorMap(np.clip(np.sqrt(depth) * 4, 0, 255).astype(np.uint8), cv2.COLORMAP_HSV)
+
+def _ctk_interface(key_values, color_buf, depth_buf, color2_buf):
+  ctk.set_appearance_mode("Dark")
+  ctk.set_default_color_theme("blue")
+  app = ctk.CTk()
+  app.geometry("1600x900")
+
+  h, w = lan.frame_shape
+  color_np = np.frombuffer(color_buf, np.uint8).reshape((h, w, 3))
+  depth_np = np.frombuffer(depth_buf, np.uint16).reshape((h, w))
+  color2_np = np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3))
+
+  depth_image = Image.fromarray(_depth2rgb(depth_np))
+  color_image = Image.fromarray(color_np)
+  color2_image = Image.fromarray(color2_np)
+  color_photo = ImageTk.PhotoImage(image=color_image)
+  depth_photo = ImageTk.PhotoImage(image=depth_image)
+  color2_photo = ImageTk.PhotoImage(image=color2_image)
+
+  color_canvas = ctk.CTkCanvas(app, width=lan.frame_shape[1], height=lan.frame_shape[0])
+  color_canvas.place(x=20, y=20)
+  canvas_color_object = color_canvas.create_image(0, 0, anchor=ctk.NW, image=color_photo)
+  depth_canvas = ctk.CTkCanvas(app, width=lan.frame_shape[1], height=lan.frame_shape[0])
+  depth_canvas.place(x=680, y=20)
+  canvas_depth_object = depth_canvas.create_image(0, 0, anchor=ctk.NW, image=depth_photo)
+  color2_canvas = ctk.CTkCanvas(app, width=lan.frame_shape[1], height=lan.frame_shape[0])
+  color2_canvas.place(x=20, y=400)
+  canvas_color2_object = color2_canvas.create_image(0, 0, anchor=ctk.NW, image=color2_photo)
+
+  def animate():
+    app.after(8, animate)
+
+    depth_image = Image.fromarray(_depth2rgb(depth_np))
+    color_image = Image.frombuffer('RGB', (w, h), color_buf, 'raw')
+    c2 = lan.cam2_enable.value
+    if c2:
+      color2_image = Image.frombuffer('RGB', (w, h), color2_buf, 'raw')
+
+    color_photo.paste(color_image)
+    depth_photo.paste(depth_image)
+    if c2:
+      color2_photo.paste(color2_image)
+
+    color_canvas.itemconfig(canvas_color_object, image=color_photo)
+    depth_canvas.itemconfig(canvas_depth_object, image=depth_photo)
+    if c2:
+      color2_canvas.itemconfig(canvas_color2_object, image=color2_photo)
+
+  keycodes = {}
+  keyrelease = {}
+
+  def on_key_press(event):
+    charcode = ord(event.char) if event.char else None
+    if charcode and charcode > 0 and charcode < 128:
+      keycodes[event.keycode] = charcode
+      keyrelease[event.keycode] = time.time()
+      key_values[charcode] = 1
+
+  def on_key_release(event):
+    charcode = None
+    if event.keycode in keycodes: charcode = keycodes[event.keycode]
+    if charcode and charcode > 0 and charcode < 128:
+      def release_check():
+        if time.time() - keyrelease[event.keycode] > 0.099:
+          key_values[charcode] = 0
+      keyrelease[event.keycode] = time.time()
+      app.after(100, release_check)
+
+  app.bind("<KeyPress>", on_key_press)
+  app.bind("<KeyRelease>", on_key_release)
+  app.after(8, animate)
+  app.mainloop()
+  lan.stop()
 
 class RemoteInterface:
   def __init__(self, host="0.0.0.0", port=9999):
@@ -12,113 +98,55 @@ class RemoteInterface:
     Args:
         host (str, optional): host ip of the robot. Defaults to "0.0.0.0".
     """
-    lan.start(host, port, frame_shape=(360, 640))
-    self.motor_vals = np.zeros((10,), np.int32)
-    self.sensor_vals = np.zeros((20,), np.int32)
-
-    pygame.init()
-    self.screen = pygame.display.set_mode((1280, 720))
-    self.clock = pygame.time.Clock()
-    self.screen.fill((63, 63, 63))
-
-    self.color = None
-    self.depth = None
-
-    self.keys = {k[2:]: 0 for k in dir(pygame) if k.startswith("K_")}
-    self.keynames = list(self.keys.keys())
-
-    self.free_frame1 = np.zeros((360, 640, 3), np.uint8)
-    self.free_frame2 = np.zeros((360, 640, 3), np.uint8)
-
-    # open3d to viz rgb and depth
+    lan.start(host, port)
+    self.keyboard_buf = RawArray(c_uint8, 128)
+    self.ui_task = Process(target=_ctk_interface, args=(self.keyboard_buf, lan.color_buf, lan.depth_buf, lan.color2_buf))
+    self.ui_task.start()
 
   def __del__(self):
     lan.stop()
+    if self.ui_task:
+      self.ui_task.kill()
+    # sys.exit(1)
 
-  def disp1(self, frame):
-    """Set an optional output frame to view in disp 1
+  @property
+  def keys(self):
+    return {
+      chr(x): self.keyboard_buf[x] for x in range(128)
+    }
+
+  def disp(self, frame):
+    """Set an optional output frame
 
     Args:
         frame (np.ndarray): frame sized (360, 640, 3) that can be displayed in real time
     """
-    self.free_frame1 = frame
+    self.free_frame = frame
 
-  def disp2(self, frame):
-    """Set an optional output frame to view in disp 2
-
-    Args:
-        frame (np.ndarray): frame sized (360, 640, 3) that can be displayed in real time
-    """
-    self.free_frame2 = frame
-  
-  def depth2rgb(self, depth):
-    """Turn a depth frame into a viewable rgb frame
-
-    Args:
-        depth (np.ndarray): depth frame
-
-    Returns:
-        np.ndarray: depth frame as color
-    """
-    return cv2.applyColorMap(np.sqrt(depth).astype(np.uint8), cv2.COLORMAP_JET)
-  
   @property
   def motor(self):
-    return self.motor_vals
-  
-  @property
-  def sensor(self, idx):
-    return self.sensor_vals[idx]
+    return lan.motor_values
   
   def read(self):
     """Read sensor values from the robot, including color and depth
 
     Returns:
-        (np.ndarray, np.ndarray, np.ndarray): color, depth, other sensor values
+        (np.ndarray, np.ndarray, np.ndarray, dict): color, depth, other sensor values
     """
-    return self.color, self.depth, np.copy(self.sensor_vals)
+    return lan.read()
   
-  def update(self):
-    """Update the robot by receiving information over WiFi
-    """
-    for event in pygame.event.get():
-      if event.type == pygame.QUIT:
-        lan.stop()
-        sys.exit(0)
-      elif event.type == pygame.KEYDOWN:
-        for keycode in self.keys.keys():
-          if event.key == getattr(pygame, f"K_{keycode}"):
-            self.keys[keycode] = 1
-      elif event.type == pygame.KEYUP:
-        for keycode in self.keys.keys():
-          if event.key == getattr(pygame, f"K_{keycode}"):
-            self.keys[keycode] = 0
-
-    self.color, self.depth = lan.get_frame()
-    if self.color is not None and self.depth is not None:
-      depthrgb = self.depth2rgb(self.depth)
-      a = (np.swapaxes(np.flip(self.free_frame1, axis=-1), 0, 1))
-      b = (np.swapaxes(np.flip(self.free_frame2, axis=-1), 0, 1))
-      c = (np.swapaxes(np.flip(self.color, axis=-1), 0, 1))
-      d = (np.swapaxes(np.flip(depthrgb, axis=-1), 0, 1))
-      a = pygame.surfarray.make_surface(a)
-      b = pygame.surfarray.make_surface(b)
-      c = pygame.surfarray.make_surface(c)
-      d = pygame.surfarray.make_surface(d)
-      self.screen.blit(c, (0, 0))
-      self.screen.blit(d, (640, 0))
-      self.screen.blit(a, (0, 360))
-      self.screen.blit(b, (640, 360))
-
-    lan.write(self.motor_vals)
-    self.sensor_vals = lan.read()
-
-    pygame.display.flip()
-
+  def running(self):
+    _running = lan.running()
+    if not _running:
+      lan.stop()
+      if self.ui_task:
+        self.ui_task.kill()
+        self.ui_task = None
+    return _running
+  
 if __name__ == "__main__":
   robot = RemoteInterface()
-  while True:
+  while robot.running():
     forward = robot.keys["w"]
-    robot.motor[0] = forward * 64
-    robot.motor[9] = forward * 64
-    robot.update()
+    robot.motor[0] = forward * 0.25
+    robot.motor[9] = forward * 0.25
