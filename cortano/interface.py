@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import platform
 if platform.system() == "Darwin":
   import customtkinter as ctk
 else:
@@ -16,7 +17,6 @@ from PIL import Image, ImageTk
 import logging
 import sys
 import time
-import platform
 from . import lan
 
 def _depth2rgb(depth):
