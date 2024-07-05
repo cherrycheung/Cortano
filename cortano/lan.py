@@ -64,23 +64,22 @@ async def try_recv(host, port):
 
         lengths = data["lengths"]
         if len(lengths) >= 2:
-          frameend = frameptr + lengths[0]
           # frame_lock.acquire()
-          np.copyto(color_np, qoi.decode(
-            np.frombuffer(msg[frameptr:frameend], dtype=np.uint8)))
-          frameptr = frameend
-          frameend += lengths[1]
-          # we just want to copy over the bytes
-          np.copyto(depth_np, qoi.decode(
-            np.frombuffer(msg[frameptr:frameend], dtype=np.uint8)))
+          if lengths[0] > 0:
+            np.copyto(color_np, qoi.decode(
+              np.frombuffer(msg[frameptr:frameptr + lengths[0]], dtype=np.uint8)))
+            frameptr += lengths[0]
+          if lengths[1] > 0:
+            # we just want to copy over the bytes
+            np.copyto(depth_np, qoi.decode(
+              np.frombuffer(msg[frameptr:frameptr + lengths[1]], dtype=np.uint8)))
+            frameptr += lengths[1]
           # frame_lock.release()
           if len(lengths) == 3:
-            frameptr = frameend
-            frameend += lengths[2]
             # frame2_lock.acquire()
             cam2_enable.value = True
             np.copyto(color2_np, qoi.decode(
-              np.frombuffer(msg[frameptr:frameend], dtype=np.uint8)))
+              np.frombuffer(msg[frameptr:frameptr + lengths[2]], dtype=np.uint8)))
             # frame2_lock.release()
 
         sensor_values.acquire()
