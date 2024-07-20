@@ -29,9 +29,9 @@ def _ctk_interface(key_values, color_buf, depth_buf, color2_buf):
   app.geometry("1600x900")
 
   h, w = lan.frame_shape
-  color_np = cv2.cvtColor(np.frombuffer(color_buf, np.uint8).reshape((h, w, 3)), cv2.COLOR_RGB2BGR)
-  depth_np = np.frombuffer(depth_buf, np.uint16).reshape((h, w))
-  color2_np = cv2.cvtColor(np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3)), cv2.COLOR_RGB2BGR)
+  color_np = cv2.cvtColor(color_buf.numpy().reshape((h, w, 3)), cv2.COLOR_RGB2BGR)
+  depth_np = depth_buf.numpy(np.uint16).reshape((h, w))
+  color2_np = cv2.cvtColor(color2_buf.numpy().reshape((h, w, 3)), cv2.COLOR_RGB2BGR)
 
   depth_image = Image.fromarray(_depth2rgb(depth_np))
   color_image = Image.fromarray(color_np)
@@ -51,25 +51,19 @@ def _ctk_interface(key_values, color_buf, depth_buf, color2_buf):
   canvas_color2_object = color2_canvas.create_image(0, 0, anchor=ctk.NW, image=color2_photo)
 
   def animate():
-    app.after(8, animate)
+    app.after(5, animate)
 
     depth_image = Image.fromarray(_depth2rgb(depth_np))
-    color_np = cv2.cvtColor(np.frombuffer(color_buf, np.uint8).reshape((h, w, 3)), cv2.COLOR_RGB2BGR)
     color_image = Image.fromarray(color_np)
-    c2 = lan.cam2_enable.value
-    if c2:
-      color2_np = cv2.cvtColor(np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3)), cv2.COLOR_RGB2BGR)
-      color2_image = Image.fromarray(color2_np)
+    color2_image = Image.fromarray(color2_np)
 
     color_photo.paste(color_image)
     depth_photo.paste(depth_image)
-    if c2:
-      color2_photo.paste(color2_image)
+    color2_photo.paste(color2_image)
 
     color_canvas.itemconfig(canvas_color_object, image=color_photo)
     depth_canvas.itemconfig(canvas_depth_object, image=depth_photo)
-    if c2:
-      color2_canvas.itemconfig(canvas_color2_object, image=color2_photo)
+    color2_canvas.itemconfig(canvas_color2_object, image=color2_photo)
 
   keycodes = {}
   keyrelease = {}
@@ -93,7 +87,7 @@ def _ctk_interface(key_values, color_buf, depth_buf, color2_buf):
 
   app.bind("<KeyPress>", on_key_press)
   app.bind("<KeyRelease>", on_key_release)
-  app.after(8, animate)
+  app.after(5, animate)
   app.mainloop()
   lan.stop()
   sys.exit(0)
@@ -105,9 +99,9 @@ def _pygame_interface(key_values, color_buf, depth_buf, color2_buf,
   clock = pygame.time.Clock()
 
   h, w = lan.frame_shape
-  color_np = np.frombuffer(color_buf, np.uint8).reshape((h, w, 3))
-  depth_np = np.frombuffer(depth_buf, np.uint16).reshape((h, w))
-  color2_np = np.frombuffer(color2_buf, np.uint8).reshape((h, w, 3))
+  color_np = color_buf.numpy().reshape((h, w, 3))
+  depth_np = depth_buf.numpy(np.uint16).reshape((h, w))
+  color2_np = color2_buf.numpy().reshape((h, w, 3))
 
   gamepad = None
   if pygame.joystick.get_count() > 0:
