@@ -174,7 +174,7 @@ async def sender(websocket):
       motors = motor_values[:]
       motor_values.release()
 
-      motors = [int(x) for x in np.array(motors, np.float32).clip(-1, 1) * 127]
+      motors = [int(x * 1000) for x in np.array(motors, np.float32).clip(-1, 1)]
       msg = json.dumps({"motors": motors, "ipv4": ipv4}).encode("utf-8")
       await websocket.send(msg)
     except websockets.ConnectionClosed:
