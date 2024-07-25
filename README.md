@@ -43,7 +43,7 @@ if __name__ == "__main__":
 The info struct contains additional information:
 |  |  |
 |--|--|
-| voltage | 0.0 - 14.0V
+| battery | 0.0 - 14.0V or 0-100%
 | cam2 | second camera's color frame (optional) |
 | time | timestamp on robot when data was sent |
 

@@ -79,7 +79,7 @@ class RemoteByteBuf:
 motor_values = Array(c_float, 10)
 sensor_values = Array(c_float, 20) # [sensor1, sensor2, ...]
 sensor_length = Value(c_int, 0)
-voltage_level = Value(c_float, 0)
+battery_level = Value(c_float, 0)
 
 main_loop = None
 _running = Value(c_bool, True)
@@ -191,7 +191,7 @@ async def receiver(websocket):
       sensor_values.acquire()
       nsensors = sensor_length.value = len(msg["sensors"])
       sensor_values[:nsensors] = [float(x) for x in msg["sensors"]]
-      voltage_level.value = float(msg["voltage"]) / 1e3
+      battery_level.value = float(msg["battery"] if msg["battery"] <= 100 else msg["battery"] / 1e3)
       sensor_values.release()
     except ValueError:
       logging.error("Invalid data received:", msg)
@@ -210,11 +210,11 @@ async def handle_rxtx(host, port):
 
 def rxtx_worker(host, port, run, mvals, svals, slen, vlvl):
   global main_loop, _running
-  global motor_values, sensor_values, sensor_length, voltage_level
+  global motor_values, sensor_values, sensor_length, battery_level
   motor_values = mvals
   sensor_values = svals
   sensor_length = slen
-  voltage_level = vlvl
+  battery_level = vlvl
 
   _running = run
   main_loop = asyncio.new_event_loop()
@@ -253,7 +253,7 @@ def start(host="0.0.0.0", port=9999):
   recv_task3.start()
 
   rxtx_task = Process(target=rxtx_worker, args=(
-    host, port, _running, motor_values, sensor_values, sensor_length, voltage_level))
+    host, port, _running, motor_values, sensor_values, sensor_length, battery_level))
   rxtx_task.start()
 
   color_buf = cbuf
@@ -295,10 +295,10 @@ def stop():
 # signal.signal(signal.SIGTERM, sig_handler)
 
 def read():
-  """Return sensors values, voltage (V) and time when the data comes in
+  """Return sensors values, battery (V or %) and time when the data comes in
 
   Returns:
-      Tuple[np.ndarray, np.ndarray, List[int], Dict[float, datetime, np.ndarray]]: color, depth, sensors, { voltage, time, cam2 }
+      Tuple[np.ndarray, np.ndarray, List[int], Dict[float, datetime, np.ndarray]]: color, depth, sensors, { battery, time, cam2 }
   """
   h, w = frame_shape
   color = color_buf.numpy().reshape((h, w, 3))
@@ -308,7 +308,7 @@ def read():
   sensor_values.acquire()
   ns = sensor_length.value
   sensors = [] if ns == 0 else sensor_values[:ns]
-  voltage = voltage_level.value
+  battery = battery_level.value
   sensor_values.release()
 
   last_rx_time.acquire()
@@ -319,7 +319,7 @@ def read():
     rxtime = None
   last_rx_time.release()
 
-  return color, depth, sensors, { "voltage": voltage, "time": rxtime, "cam2": color2 }
+  return color, depth, sensors, { "battery": battery, "time": rxtime, "cam2": color2 }
 
 def write(values):
   """Send motor values to remote location
