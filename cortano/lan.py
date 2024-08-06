@@ -30,15 +30,13 @@ frame_shape = (360, 640)
 tx_interval = 1 / 60
 
 class RemoteByteBuf:
-  def __init__(self, size=None):
+  def __init__(self, size=None, dtype="color"):
     self.lock = Lock()
     self.size = size
     self.buf = None if (size is None) else RawArray(c_uint8, int(np.prod(self.size)))
     self.len = Value(c_int, 0)
     self.en = Value(c_bool, False)
-
-    self.encode = lambda frame: frame
-    self.decode = lambda frame: frame
+    self.dtype = dtype
 
   def sync_process(self, lock, buf, len, en):
     self.lock = lock
@@ -110,19 +108,21 @@ def decode_depth(frame):
   depth = np.tile(depth.reshape((180, 1, 320, 1)), (1, 2, 1, 2)).reshape((360, 640))
   return depth
 
-color_buf = RemoteByteBuf((frame_shape[0], frame_shape[1], 3))
-color_buf.decode = decode_color
-depth_buf = RemoteByteBuf((frame_shape[0], frame_shape[1] // 2, 4))
-depth_buf.decode = decode_depth
-color2_buf = RemoteByteBuf((frame_shape[0], frame_shape[1], 3))
-color2_buf.decode = decode_color
+color_buf = RemoteByteBuf((frame_shape[0], frame_shape[1], 3), "color")
+depth_buf = RemoteByteBuf((frame_shape[0], frame_shape[1] // 2, 4), "depth")
+color2_buf = RemoteByteBuf((frame_shape[0], frame_shape[1], 3), "color")
 msg_buf = None
 
 async def stream_recv(websocket, path):
   _running.value = True
   async for req in websocket:
     try:
-      frame = msg_buf.decode(req)
+      if msg_buf.dtype == "color":
+        frame = decode_color(req)
+      elif msg_buf.dtype == "depth":
+        frame = decode_depth(req)
+      else:
+        raise Exception("frame type is not valid")
       msg_buf.copyfrom(frame)
     except Exception as e:
       print(e)
