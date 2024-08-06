@@ -6,3 +6,4 @@ opencv-python
 pygame
 qoi
 customtkinter
+pillow
